@@ -203,7 +203,7 @@ def train_madqn(max_steps = 1000, n_episodes = 1000, save_dir='checkpoints', sav
     log_dir = os.path.join('runs', f'MADQN_{current_time}')
     writer = SummaryWriter(log_dir)
     
-    env = MultiCarRacing(n_cars=2, grid_size=30, track_width=5, num_checkpoints=12, render_mode=None)
+    env = MultiCarRacing(n_cars=4, grid_size=30, track_width=5, num_checkpoints=12, render_mode=None)
     n_agents = 2
     state_dim = 30 * 30
     action_dim = 5
@@ -221,6 +221,8 @@ def train_madqn(max_steps = 1000, n_episodes = 1000, save_dir='checkpoints', sav
             episode_steps += 1
             states = {i: obs[i].flatten() for i in range(n_agents)}
             actions = madqn.select_action(states)
+            actions[2] = np.random.randint(0,5)
+            actions[3] = np.random.randint(0,5)
             next_obs, rewards, dones, info = env.step(actions)
             
             for agent_id in range(n_agents):
@@ -359,7 +361,7 @@ def test_madqn(checkpoint_path, n_episodes=100, render=True):
 if __name__ == "__main__":
     # train_madqn()
     # Training
-    madqn = train_madqn(n_episodes=1000, max_steps=3000, save_dir='checkpoints', save_frequency=100)
+    madqn = train_madqn(n_episodes=1000, max_steps=2000, save_dir='checkpoints', save_frequency=100)
     
     # Testing
     # Uncomment and modify path to test a specific checkpoint

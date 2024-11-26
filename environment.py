@@ -200,14 +200,14 @@ class MultiCarRacing():
                 agent.checkpoint_counters += 1
 
                 if agent.checkpoint_counters >= len(self.checkpoints):
-                    agent.reward += 500
+                    agent.reward += 100
                     # rewards[agent_id] = 1000
                     agent.done = True
                     agent.checkpoint_counters = 0
             
             # Penalty when time taken
             if not agent.done:
-                agent.reward -= 1e-6
+                agent.reward -= 0.1
                 # rewards[agent_id] = 1e-6
 
             agent.observation = self.get_observation(agent_id)
@@ -216,7 +216,7 @@ class MultiCarRacing():
         for agent_id, agent in self.agents.items():
             # Reward when teammate reaches goal
             if self.dones[agent.teammate_id]:
-                agent.reward += 250
+                agent.reward += 50
                 # rewards[agent_id] = 500
 
             # Penalty for enemy
@@ -225,18 +225,22 @@ class MultiCarRacing():
                     # If enemy reaches goal
                     if self.dones[other_id]:
                         print(f'for agent: {agent_id} enemy {other_id} reached goal')
-                        agent.reward -= 1000
+                        agent.reward -= 100
                         # rewards[agent_id] = -1000
 
                     # If enemy is ahead by a checkpoint
                     if other_agent.checkpoint_counters > agent.checkpoint_counters:
-                        agent.reward -= 1
+                        agent.reward -= 0.2
+                    elif other_agent.checkpoint_counters < agent.checkpoint_counters:
+                        agent.reward += 0.2
                         # rewards[agent_id] = -1
                     
                     # If enemy is ahead of teammate
-                    if other_agent.checkpoint_counters > self.agents[agent.teammate_id].checkpoint_counters:
-                        agent.reward -= 0.5
-                        # rewards[agent_id] = -0.5
+                    # if other_agent.checkpoint_counters > self.agents[agent.teammate_id].checkpoint_counters:
+                    #     agent.reward -= 0.5
+                    # elif other_agent.checkpoint_counters < self.agents[agent.teammate_id].checkpoint_counters:
+                    #     agent.reward += 0.5
+                    #     # rewards[agent_id] = -0.5
             
         observations = {
             agent_id: agent.observation for agent_id, agent in self.agents.items()
