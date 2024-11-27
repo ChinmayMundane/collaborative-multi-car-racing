@@ -412,9 +412,9 @@ def test_madqn(checkpoint_path, n_episodes=100, render=True):
 if __name__ == "__main__":
     # train_madqn()
     # Training
-    madqn = train_madqn(n_episodes=1000, max_steps=2000, save_dir='checkpoints', save_frequency=100)
+    # madqn = train_madqn(n_episodes=1000, max_steps=2000, save_dir='checkpoints', save_frequency=100)
     
     # Testing
     # Uncomment and modify path to test a specific checkpoint
-    # test_madqn('checkpoints/best_model/checkpoint_episode_21.pth', n_episodes=10, render=True)
+    test_madqn('checkpoints/checkpoint_episode_1000.pth', n_episodes=10, render=True)
     

@@ -20,6 +20,8 @@ class Car:
         self.agent_id = agent_id
         self.teammate_id = teammate_id
         self.position = start_pos
+        self.max_angle = 0
+        self.angle = 0
         self.checkpoint_counters = 0
         self.collision_counter = 0
         self.reward = 0
@@ -27,16 +29,18 @@ class Car:
 
     def reset(self, position, observation):
         self.position = position
+        self.max_angle = 0
+        self.angle = 0
         self.checkpoint_counters = 0
         self.collision_counter = 0
         self.reward = 0
         self.done = False
         self.observation = observation
 
-def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoints: int):
+def create_track(grid_size: int, track_width: int):
+    num_checkpoints = 12
     track = set()
     checkpoints = []
-
     # Define the center and radius for the circular track
     center_x, center_y = grid_size // 2, grid_size // 2
     outer_radius = (grid_size // 2) - 2  # Slightly smaller to ensure visibility
@@ -93,8 +97,44 @@ def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoin
 
     return track, checkpoints, start_line
 
+def angular_displacement(prev_angle, grid_size, pos_car):
+
+    x_c, y_c = grid_size // 2, grid_size // 2
+
+    x1 = pos_car[0]
+    y1 = pos_car[1]
+
+    # Compute the current angle (in radians) using atan2
+    current_angle = math.atan2(y1 - y_c, x1 - x_c)
+    
+    # Convert to degrees for easier interpretation (optional)
+    current_angle_deg = math.degrees(current_angle)
+
+    # Adjust the angle so that the lowest point (x_c, y_c - r) corresponds to 0 degrees
+    # The lowest point of the circle should be 0 degrees, and we treat clockwise as positive, counterclockwise as negative
+    current_angle_deg -= 90
+
+    # Floor the angles to nearest integer values
+    current_angle_deg = math.floor(current_angle_deg)
+    prev_angle_deg = math.floor(prev_angle)
+
+    # Compute angular displacement in degrees
+    delta_theta = current_angle_deg - prev_angle_deg
+
+    # Normalize the displacement to make sure the angle stays within [-360, 360] degrees
+    if delta_theta > 180:
+        delta_theta -= 360  # If we go over 180, adjust to the negative equivalent
+    elif delta_theta < -180:
+        delta_theta += 360  # If we go below -180, adjust to the positive equivalent
+
+    # Update the total angle (also floored to nearest integer)
+    total_angle = prev_angle_deg + delta_theta
+    total_angle = math.floor(total_angle)  # Ensure total displacement is an integer
+
+    return total_angle
+
 class MultiCarRacing():
-    def __init__(self, n_cars: int = 4, grid_size: int = 30, track_width: int = 5, num_checkpoints: int = 12, render_mode=None):
+    def __init__(self, n_cars: int = 4, grid_size: int = 30, track_width: int = 5, render_mode=None):
         super().__init__()
         self.n_cars = n_cars
         self.grid_rows = grid_size
@@ -102,8 +142,8 @@ class MultiCarRacing():
         self.render_mode = render_mode
         
         # Create track first
-        self.track, self.checkpoints, self.start_line = create_track_and_checkpoints(
-            grid_size, track_width, num_checkpoints
+        self.track, self.checkpoints, self.start_line = create_track(
+            grid_size, track_width
         )
         
         # Initialize agents with starting positions
@@ -116,10 +156,17 @@ class MultiCarRacing():
             start_pos = self.start_line[agent_id % len(self.start_line)]
             self.agents[agent_id] = Car(start_pos, agent_id, teammate_id)
 
-
-        self.action_space = {agent_id: [0, 1, 2, 3, 4] for agent_id in range(n_cars)}
         self.observation_space = {
-            agent_id: np.zeros((grid_size, grid_size)) for agent_id in range(n_cars)
+            agent_id: np.concatenate([
+                np.zeros((grid_size, grid_size)).flatten(),  # Flattened grid of zeros (grid_size * grid_size)
+                np.array([agent.angle]),  # Current agent's angle
+                np.array([self.agents[agent.teammate_id].angle]),  # Teammate's angle
+                np.array([
+                    other_agent.angle for other_id, other_agent in self.agents.items()
+                    if other_id != agent_id and other_id != agent.teammate_id  # Angles of all other agents (excluding current agent and teammate)
+                ])
+            ])
+            for agent_id, agent in self.agents.items()
         }
 
         # Pygame Setup for rendering
@@ -136,10 +183,6 @@ class MultiCarRacing():
         for agent_id, agent in self.agents.items():
             start_pos = self.start_line[agent_id % len(self.start_line)]
             
-            # agent.position = start_pos
-            # agent.checkpoint_counters = 0
-            # agent.collision_counter = 0
-            # agent.done = False
             agent.reset(start_pos, self.get_observation(agent_id))
         
         self.rewards = {agent_id: 0 for agent_id in self.agents}
@@ -192,23 +235,24 @@ class MultiCarRacing():
         # Position update
         for agent_id, agent in self.agents.items():
             agent.position = intended_position[agent_id]
+            agent.angle = angular_displacement(agent.angle, self.grid_rows, agent.position)
 
             # Reward on reaching checkpont
             if agent.position in self.checkpoints[agent.checkpoint_counters]:
-                agent.reward += 5
-                # rewards[agent_id] = 5
                 agent.checkpoint_counters += 1
 
                 if agent.checkpoint_counters >= len(self.checkpoints):
-                    agent.reward += 100
-                    # rewards[agent_id] = 1000
                     agent.done = True
                     agent.checkpoint_counters = 0
+
+            # Reward for increasing angle
+            if agent.angle > agent.max_angle:
+                agent.max_angle = agent.angle
+                agent.reward += agent.angle
             
             # Penalty when time taken
             if not agent.done:
-                agent.reward -= 0.1
-                # rewards[agent_id] = 1e-6
+                agent.reward -= 1
 
             agent.observation = self.get_observation(agent_id)
             self.dones[agent_id] = agent.done
@@ -216,8 +260,7 @@ class MultiCarRacing():
         for agent_id, agent in self.agents.items():
             # Reward when teammate reaches goal
             if self.dones[agent.teammate_id]:
-                agent.reward += 50
-                # rewards[agent_id] = 500
+                agent.reward += 360
 
             # Penalty for enemy
             for other_id, other_agent in self.agents.items():
@@ -225,22 +268,13 @@ class MultiCarRacing():
                     # If enemy reaches goal
                     if self.dones[other_id]:
                         print(f'for agent: {agent_id} enemy {other_id} reached goal')
-                        agent.reward -= 100
-                        # rewards[agent_id] = -1000
+                        agent.reward -= 10000
 
-                    # If enemy is ahead by a checkpoint
-                    if other_agent.checkpoint_counters > agent.checkpoint_counters:
-                        agent.reward -= 0.2
-                    elif other_agent.checkpoint_counters < agent.checkpoint_counters:
-                        agent.reward += 0.2
-                        # rewards[agent_id] = -1
-                    
-                    # If enemy is ahead of teammate
-                    # if other_agent.checkpoint_counters > self.agents[agent.teammate_id].checkpoint_counters:
-                    #     agent.reward -= 0.5
-                    # elif other_agent.checkpoint_counters < self.agents[agent.teammate_id].checkpoint_counters:
-                    #     agent.reward += 0.5
-                    #     # rewards[agent_id] = -0.5
+                # If enemy is ahead by angle
+                if other_agent.angle > agent.angle:
+                    agent.reward -= 1e-3
+                elif other_agent.angle < agent.angle:
+                    agent.reward += 1e-3
             
         observations = {
             agent_id: agent.observation for agent_id, agent in self.agents.items()
@@ -373,6 +407,7 @@ class MultiCarRacing():
             pygame.quit()
 
     def get_observation(self, agent_id):
+
         observation = np.zeros((self.grid_rows, self.grid_columns), dtype=int)
 
         # 1 for track
@@ -391,5 +426,22 @@ class MultiCarRacing():
                 # If enemy 3
                 else:
                     observation[pos[0], pos[1]] = 4
+
+        # Get the agent's angle, teammate's angle, and angles of other agents
+        agent_angle = self.agents[agent_id].angle
+        teammate_angle = self.agents[self.agents[agent_id].teammate_id].angle
+
+        # Get the angles of all other agents excluding the current agent and their teammate
+        other_agents_angles = np.array([
+            other_agent.angle for other_id, other_agent in self.agents.items()
+            if other_id != agent_id and other_id != self.agents[agent_id].teammate_id
+        ])
+
+        observation = np.concatenate([
+            observation.flatten(),           # Flattened previous observation
+            np.array([agent_angle]),         # Current agent's angle
+            np.array([teammate_angle]),      # Teammate's angle
+            other_agents_angles              # Angles of all other agents
+        ])
         
         return observation
