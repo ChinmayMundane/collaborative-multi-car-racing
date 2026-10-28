@@ -1,8 +1,8 @@
 import math
 import numpy as np
-# from agent import Car
 import pygame
 
+# Constants
 GRID_SIZE = 30
 CELL_SIZE = 30  # Each cell's width and height in pixels
 SCREEN_SIZE = GRID_SIZE * CELL_SIZE
@@ -20,23 +20,33 @@ class Car:
         self.agent_id = agent_id
         self.teammate_id = teammate_id
         self.position = start_pos
+        self.initial_position = start_pos
+        self.max_angle = 0
+        self.angle = 0
         self.checkpoint_counters = 0
         self.collision_counter = 0
+        self.total_distance_traveled = 0
         self.reward = 0
         self.done = False
+        self.steps_since_last_checkpoint = 0
 
     def reset(self, position, observation):
         self.position = position
+        self.initial_position = position
+        self.max_angle = 0
+        self.angle = 0
         self.checkpoint_counters = 0
         self.collision_counter = 0
+        self.total_distance_traveled = 0
         self.reward = 0
         self.done = False
+        self.steps_since_last_checkpoint = 0
         self.observation = observation
 
-def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoints: int):
+def create_track(grid_size: int, track_width: int):
+    num_checkpoints = 12
     track = set()
     checkpoints = []
-
     # Define the center and radius for the circular track
     center_x, center_y = grid_size // 2, grid_size // 2
     outer_radius = (grid_size // 2) - 2  # Slightly smaller to ensure visibility
@@ -93,8 +103,42 @@ def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoin
 
     return track, checkpoints, start_line
 
+def angular_displacement(prev_angle, grid_size, pos_car):
+    x_c, y_c = grid_size // 2, grid_size // 2
+
+    x1 = pos_car[0]
+    y1 = pos_car[1]
+
+    # Compute the current angle (in radians) using atan2
+    current_angle = math.atan2(y1 - y_c, x1 - x_c)
+    
+    # Convert to degrees for easier interpretation (optional)
+    current_angle_deg = math.degrees(current_angle)
+
+    # Adjust the angle so that the lowest point (x_c, y_c - r) corresponds to 0 degrees
+    current_angle_deg -= 90
+
+    # Floor the angles to nearest integer values
+    current_angle_deg = math.floor(current_angle_deg)
+    prev_angle_deg = math.floor(prev_angle)
+
+    # Compute angular displacement in degrees
+    delta_theta = current_angle_deg - prev_angle_deg
+
+    # Normalize the displacement to make sure the angle stays within [-360, 360] degrees
+    if delta_theta > 180:
+        delta_theta -= 360  # If we go over 180, adjust to the negative equivalent
+    elif delta_theta < -180:
+        delta_theta += 360  # If we go below -180, adjust to the positive equivalent
+
+    # Update the total angle (also floored to nearest integer)
+    total_angle = prev_angle_deg + delta_theta
+    total_angle = math.floor(total_angle)  # Ensure total displacement is an integer
+
+    return total_angle
+
 class MultiCarRacing():
-    def __init__(self, n_cars: int = 4, grid_size: int = 30, track_width: int = 5, num_checkpoints: int = 12, render_mode=None):
+    def __init__(self, n_cars: int = 4, grid_size: int = 30, track_width: int = 5, render_mode=None):
         super().__init__()
         self.n_cars = n_cars
         self.grid_rows = grid_size
@@ -102,8 +146,8 @@ class MultiCarRacing():
         self.render_mode = render_mode
         
         # Create track first
-        self.track, self.checkpoints, self.start_line = create_track_and_checkpoints(
-            grid_size, track_width, num_checkpoints
+        self.track, self.checkpoints, self.start_line = create_track(
+            grid_size, track_width
         )
         
         # Initialize agents with starting positions
@@ -116,10 +160,18 @@ class MultiCarRacing():
             start_pos = self.start_line[agent_id % len(self.start_line)]
             self.agents[agent_id] = Car(start_pos, agent_id, teammate_id)
 
-
-        self.action_space = {agent_id: [0, 1, 2, 3, 4] for agent_id in range(n_cars)}
         self.observation_space = {
-            agent_id: np.zeros((grid_size, grid_size)) for agent_id in range(n_cars)
+            agent_id: np.concatenate([
+                np.zeros((grid_size, grid_size)).flatten(),  # Flattened grid of zeros (grid_size * grid_size)
+                np.array([agent.angle]),  # Current agent's angle
+                np.array([self.agents[agent.teammate_id].angle]),  # Teammate's angle
+                np.array([
+                    other_agent.angle
+                    for other_id, other_agent in self.agents.items()
+                    if other_id != agent_id and other_id != agent.teammate_id  # Angles of all other agents (excluding current agent and teammate)
+                ])
+            ])
+            for agent_id, agent in self.agents.items()
         }
 
         # Pygame Setup for rendering
@@ -130,16 +182,11 @@ class MultiCarRacing():
             self.clock = pygame.time.Clock()
             self.font = pygame.font.Font(None, 24)
 
-
     def reset(self):
         # Reset each agent to its starting position
         for agent_id, agent in self.agents.items():
             start_pos = self.start_line[agent_id % len(self.start_line)]
             
-            # agent.position = start_pos
-            # agent.checkpoint_counters = 0
-            # agent.collision_counter = 0
-            # agent.done = False
             agent.reset(start_pos, self.get_observation(agent_id))
         
         self.rewards = {agent_id: 0 for agent_id in self.agents}
@@ -148,105 +195,91 @@ class MultiCarRacing():
         return {agent_id: agent.observation for agent_id, agent in self.agents.items()}
     
     def step(self, action_dict):
-
         observations = {}
         rewards = {}
-        infos = {}
         dones = {}
+        infos = {}
 
+        # Intended positions based on actions
         intended_position = {agent_id: agent.position for agent_id, agent in self.agents.items()}
 
-        # Check Valid Position 
         for agent_id, agent in self.agents.items():
-            if self.dones[agent_id]:
-                pass # Add dead step here
-            else:
+            if not self.dones[agent_id]:
                 action = action_dict[agent_id]
                 position = agent.position
-                if agent.collision_counter > 0:
-                    agent.collision_counter -= 1
-                else:
-                    # Handle movement based on action
-                    if action == 0:  # Move left
-                        new_pos = (position[0] - 1, position[1])
-                    elif action == 1:  # Move right
-                        new_pos = (position[0] + 1, position[1])
-                    elif action == 2:  # Move forward
-                        new_pos = (position[0], position[1] + 1)
-                    elif action == 3:  # Move back
-                        new_pos = (position[0], position[1] - 1)
-                    else:  # Stay in place
-                        new_pos = position
-                    
-                    # Check if the new position is within the track boundaries
-                    intended_position[agent_id] = new_pos if new_pos in self.track else position
-                
-                # Check collision with other cars
-                for other_agent_id, other_agent in self.agents.items():
-                    if agent_id != other_agent_id and intended_position[agent_id] == intended_position[other_agent_id]:
-                        agent.collision_counter = 2
-                        intended_position[agent_id] = position
-                        other_agent.collision_counter = 2
-                
-            
-        # Position update
+
+                # Movement logic
+                movement_map = {
+                    0: (position[0] - 1, position[1]),  # Left
+                    1: (position[0] + 1, position[1]),  # Right
+                    2: (position[0], position[1] + 1),  # Forward
+                    3: (position[0], position[1] - 1),  # Back
+                }
+                new_pos = movement_map.get(action, position)
+                intended_position[agent_id] = new_pos if new_pos in self.track else position
+
+        # Collision handling and reward updates
         for agent_id, agent in self.agents.items():
+            prev_pos = agent.position
             agent.position = intended_position[agent_id]
 
-            # Reward on reaching checkpont
+            # Reward for progressing distance
+            if agent.position != prev_pos:
+                agent.total_distance_traveled += 1
+                agent.steps_since_last_checkpoint += 1
+                agent.reward += 1  # Small reward for moving
+
+            # Collision detection
+            for other_id, other_agent in self.agents.items():
+                if agent_id != other_id and agent.position == other_agent.position:
+                    agent.collision_counter = 2
+                    other_agent.collision_counter = 2
+                    agent.reward -= 10  # Penalty for collision
+                    intended_position[agent_id] = prev_pos
+
+            # Checkpoint rewards
             if agent.position in self.checkpoints[agent.checkpoint_counters]:
-                agent.reward += 5
-                # rewards[agent_id] = 5
                 agent.checkpoint_counters += 1
+                agent.steps_since_last_checkpoint = 0
+                agent.reward += 50 * (1 + 1 / (agent.checkpoint_counters + 1))  # Reward diminishes with more checkpoints
 
                 if agent.checkpoint_counters >= len(self.checkpoints):
-                    agent.reward += 500
-                    # rewards[agent_id] = 1000
+                    agent.reward += 1000  # Bonus for completing all checkpoints
                     agent.done = True
-                    agent.checkpoint_counters = 0
-            
-            # Penalty when time taken
-            if not agent.done:
-                agent.reward -= 1e-6
-                # rewards[agent_id] = 1e-6
 
+            # Angular displacement reward
+            prev_angle = agent.angle
+            agent.angle = angular_displacement(prev_angle, self.grid_rows, agent.position)
+            angle_smoothness = abs(agent.angle - prev_angle)
+            agent.reward += max(0, 10 - angle_smoothness)  # Reward for smooth transitions
+
+            # Penalty for idling
+            agent.reward -= 1  # Small time penalty
+
+            # Update observation
             agent.observation = self.get_observation(agent_id)
             self.dones[agent_id] = agent.done
 
+        # Team and enemy interaction
         for agent_id, agent in self.agents.items():
-            # Reward when teammate reaches goal
+            # Reward for teammate's success
             if self.dones[agent.teammate_id]:
-                agent.reward += 250
-                # rewards[agent_id] = 500
+                agent.reward += 500
 
-            # Penalty for enemy
+            # Penalty for enemy success
             for other_id, other_agent in self.agents.items():
                 if other_id != agent_id and other_id != agent.teammate_id:
-                    # If enemy reaches goal
                     if self.dones[other_id]:
-                        print(f'for agent: {agent_id} enemy {other_id} reached goal')
-                        agent.reward -= 1000
-                        # rewards[agent_id] = -1000
+                        agent.reward -= 500
 
-                    # If enemy is ahead by a checkpoint
-                    if other_agent.checkpoint_counters > agent.checkpoint_counters:
-                        agent.reward -= 1
-                        # rewards[agent_id] = -1
-                    
-                    # If enemy is ahead of teammate
-                    if other_agent.checkpoint_counters > self.agents[agent.teammate_id].checkpoint_counters:
-                        agent.reward -= 0.5
-                        # rewards[agent_id] = -0.5
-            
-        observations = {
-            agent_id: agent.observation for agent_id, agent in self.agents.items()
-        }
+        # Update all dictionaries
+        rewards = {agent_id: agent.reward for agent_id, agent in self.agents.items()}
+        observations = {agent_id: agent.observation for agent_id, agent in self.agents.items()}
+        dones = self.dones
+        infos = {}
 
-        rewards = {
-            agent_id: agent.reward for agent_id, agent in self.agents.items()
-        }
-        
-        return observations, rewards, self.dones, infos
+        return observations, rewards, dones, infos
+
 
     def render(self):
         if self.render_mode != "human":
@@ -312,6 +345,7 @@ class MultiCarRacing():
                 
                 # Draw filled circle
                 pygame.draw.circle(self.screen, color, center, radius)
+                
                 # Draw border
                 pygame.draw.circle(self.screen, BLACK, center, radius, 2)
                 
@@ -369,6 +403,7 @@ class MultiCarRacing():
             pygame.quit()
 
     def get_observation(self, agent_id):
+
         observation = np.zeros((self.grid_rows, self.grid_columns), dtype=int)
 
         # 1 for track
@@ -387,5 +422,22 @@ class MultiCarRacing():
                 # If enemy 3
                 else:
                     observation[pos[0], pos[1]] = 4
+
+        # Get the agent's angle, teammate's angle, and angles of other agents
+        agent_angle = self.agents[agent_id].angle
+        teammate_angle = self.agents[self.agents[agent_id].teammate_id].angle
+
+        # Get the angles of all other agents excluding the current agent and their teammate
+        other_agents_angles = np.array([
+            other_agent.angle for other_id, other_agent in self.agents.items()
+            if other_id != agent_id and other_id != self.agents[agent_id].teammate_id
+        ])
+
+        observation = np.concatenate([
+            observation.flatten(),           # Flattened previous observation
+            np.array([agent_angle]),         # Current agent's angle
+            np.array([teammate_angle]),      # Teammate's angle
+            other_agents_angles              # Angles of all other agents
+        ])
         
         return observation

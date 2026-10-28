@@ -28,11 +28,7 @@ class DQNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(128, output_dim)
         ).to(device)
-<<<<<<< HEAD
-
-=======
     
->>>>>>> 769659f7e8a5e902175b74b7b1ce6afa5438a0fb
     def forward(self, x):
         return self.network(x)
 
@@ -67,7 +63,17 @@ class ReplayBuffer:
         return len(self.buffer)
 
 class MADQN:
-    def __init__(self, n_agents, state_dim, action_dim, writer):
+    def __init__(self, n_agents,
+                 state_dim,
+                 action_dim,
+                 writer,
+                 epsilon = 1.0,
+                 epsilon_min = 0.1,
+                 epsilon_decay = 0.5,
+                 gamma = 0.95,
+                 batch_size = 64,
+                 target_update_frequency = 10
+                 ):
         self.n_agents = n_agents
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -86,12 +92,12 @@ class MADQN:
             self.optimizers[agent_id] = optim.Adam(self.q_networks[agent_id].parameters())
             self.replay_buffers[agent_id] = ReplayBuffer(capacity=10000)
         
-        self.epsilon = 1.0
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.999
-        self.gamma = 0.95
-        self.batch_size = 64
-        self.target_update_frequency = 10
+        self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.gamma = gamma
+        self.batch_size = batch_size
+        self.target_update_frequency = target_update_frequency
         self.update_counter = 0
         self.training_step = 0
     
@@ -207,24 +213,31 @@ def train_madqn(max_steps = 1000, n_episodes = 1000, save_dir='checkpoints', sav
     log_dir = os.path.join('runs', f'MADQN_{current_time}')
     writer = SummaryWriter(log_dir)
     
-    env = MultiCarRacing(n_cars=2, grid_size=30, track_width=5, num_checkpoints=12, render_mode=None)
+    n_cars = 4
+    env = MultiCarRacing(n_cars=n_cars, grid_size=30, track_width=5, render_mode=None)
     n_agents = 2
-    state_dim = 30 * 30
+    state_dim = 30 * 30 + n_cars
     action_dim = 5
     
     madqn = MADQN(n_agents, state_dim, action_dim, writer)
+    madqn2 = MADQN(n_agents, state_dim, action_dim, writer, epsilon=0, gamma=0)
     
     best_avg_reward = float('-inf')
     
     for episode in range(n_episodes):
         obs = env.reset()
-        episode_rewards = {i: 0 for i in range(n_agents)}
+        episode_rewards = {i: 0 for i in range(n_cars)}
         episode_steps = 0
         
         for step in range(max_steps):
             episode_steps += 1
-            states = {i: obs[i].flatten() for i in range(n_agents)}
+            states = {i: obs[i].flatten() for i in range(n_cars)}
             actions = madqn.select_action(states)
+            actions2 = madqn2.select_action(states)
+
+            actions[2] = actions2[0]
+            actions[3] = actions2[1]
+
             next_obs, rewards, dones, info = env.step(actions)
             
             for agent_id in range(n_agents):
@@ -236,10 +249,24 @@ def train_madqn(max_steps = 1000, n_episodes = 1000, save_dir='checkpoints', sav
                     dones[agent_id]
                 )
                 episode_rewards[agent_id] = rewards[agent_id]
+
+            for enemy_id in range(n_agents):
+                i = enemy_id + 2
+                madqn2.replay_buffers[enemy_id].push(
+                    states[i],
+                    actions[i],
+                    rewards[i],
+                    next_obs[i].flatten(),
+                    dones[i]
+                )
+                episode_rewards[i] = rewards[i]
             
             for agent_id in range(n_agents):
                 madqn.update(agent_id)
             
+            for enemy_id in range(n_agents):
+                madqn2.update(enemy_id)
+
             obs = next_obs
             
             if any(dones.values()):
@@ -248,7 +275,7 @@ def train_madqn(max_steps = 1000, n_episodes = 1000, save_dir='checkpoints', sav
         # Log metrics
 
         #Log episode metrics to TensorBoard
-        for agent_id in range(n_agents):
+        for agent_id in range(n_cars):
             writer.add_scalar(f'Rewards/agent_{agent_id}', episode_rewards[agent_id], episode)
             writer.add_scalar(f'Steps/agent_{agent_id}', episode_steps, episode)
         
@@ -257,6 +284,12 @@ def train_madqn(max_steps = 1000, n_episodes = 1000, save_dir='checkpoints', sav
 
         avg_reward = sum(episode_rewards.values()) / n_agents
         writer.add_scalar('Rewards/average', avg_reward, episode)
+
+        # Assuming episode_rewards is a dictionary with agent_id as keys and reward as values
+        first_two_agents = list(episode_rewards.values())[:2]
+
+        # Compute the average reward for the first two agents
+        avg_reward_first_two_agents = sum(first_two_agents) / len(first_two_agents)
 
         # Log checkpoints reached and other custom metrics if available in info
         if info:
@@ -271,14 +304,14 @@ def train_madqn(max_steps = 1000, n_episodes = 1000, save_dir='checkpoints', sav
             madqn.save_model(save_dir, episode + 1)
         
         # Save best model
-        if avg_reward > best_avg_reward:
-            best_avg_reward = avg_reward
+        if avg_reward_first_two_agents > best_avg_reward:
+            best_avg_reward = avg_reward_first_two_agents
             madqn.save_model(os.path.join(save_dir, 'best_model'), episode + 1)
         
         print(f"Episode {episode + 1}")
         for agent_id in range(madqn.n_agents):
             print(f"Agent {agent_id} total reward: {episode_rewards[agent_id]}")
-        print(f"Average Reward: {avg_reward:.2f}")
+        print(f"Average Reward: {avg_reward_first_two_agents:.2f}")
         print(f"Epsilon: {madqn.epsilon}")
         print("--------------------")
     
@@ -298,10 +331,9 @@ def test_madqn(checkpoint_path, n_episodes=100, render=True):
     
     # Initialize environment and agent
     env = MultiCarRacing(
-        n_cars=config['n_agents'],
+        n_cars=4,
         grid_size=30,
         track_width=5,
-        num_checkpoints=12,
         render_mode='human' if render else None
     )
     
@@ -329,10 +361,12 @@ def test_madqn(checkpoint_path, n_episodes=100, render=True):
         while not done:
             states = {i: obs[i].flatten() for i in range(madqn.n_agents)}
             actions = madqn.select_action(states)
+            actions[2] = np.random.randint(0, 5)
+            actions[3] = np.random.randint(0, 5)
             obs, rewards, dones, info = env.step(actions)
             
             for agent_id in range(madqn.n_agents):
-                episode_rewards[agent_id] += rewards[agent_id]
+                episode_rewards[agent_id] = rewards[agent_id]
             
             if render:
                 env.render()
@@ -363,9 +397,9 @@ def test_madqn(checkpoint_path, n_episodes=100, render=True):
 if __name__ == "__main__":
     # train_madqn()
     # Training
-    madqn = train_madqn(n_episodes=1000, max_steps=3000, save_dir='checkpoints', save_frequency=100)
+    madqn = train_madqn(n_episodes=1000, max_steps=1000, save_dir='checkpoints', save_frequency=100)
     
     # Testing
     # Uncomment and modify path to test a specific checkpoint
-    # test_madqn('checkpoints/best_model/checkpoint_episode_10.pth', n_episodes=10, render=True)
+    # test_madqn('checkpoints/checkpoint_episode_1000.pth', n_episodes=10, render=True)
     
